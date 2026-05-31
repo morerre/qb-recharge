@@ -15,12 +15,19 @@ HTML_PAGE = '''
 <html>
 <head>
     <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
-    <title>Q币充值助手</title>
+    <title>自动助手</title>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         body { font-family: sans-serif; max-width: 400px; margin: 40px auto; padding: 20px; }
-        input, select, button { width: 100%; padding: 10px; margin: 8px 0; font-size: 16px; }
+        input, select, button {
+            width: 100%;
+            padding: 10px;
+            margin: 8px 0;
+            font-size: 16px;
+            box-sizing: border-box; /* 关键：padding 不会撑宽 */
+            border: 1px solid #ccc;   /* 统一边框，保证一样宽 */
+        }
         button { background: #1677ff; color: white; border: none; border-radius: 6px; cursor: pointer; }
         button:disabled { background: #aaa; }
         #status { margin-top: 15px; padding: 10px; background: #f0f0f0; border-radius: 6px; }
