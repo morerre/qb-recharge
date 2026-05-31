@@ -14,6 +14,7 @@ HTML_PAGE = '''
 <!DOCTYPE html>
 <html>
 <head>
+    <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
     <title>Q币充值助手</title>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
