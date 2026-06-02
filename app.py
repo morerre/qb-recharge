@@ -1,11 +1,10 @@
-from flask import Flask, request, jsonify, render_template_string, Response
+from flask import Flask, request, jsonify, render_template_string
 import requests
 from bs4 import BeautifulSoup
 import os
 import traceback
 import time
 import random
-from urllib.parse import urljoin
 
 app = Flask(__name__)
 
@@ -38,7 +37,6 @@ HTML_PAGE = '''
         #status { margin-top: 15px; padding: 10px; background: #f0f0f0; border-radius: 6px; }
         #pay-btn { background: #52c41a; display: none; }
         #manual-btn { background: #fa8c16; display: none; }
-        #proxy-btn { background: #722ed1; display: none; }
     </style>
 </head>
 <body>
@@ -53,11 +51,11 @@ HTML_PAGE = '''
     <button onclick="generateOrder()">开始生成订单</button>
     <div id="status">等待操作...</div>
     <button id="pay-btn" onclick="openPayment()">打开支付宝付款</button>
-    <button id="proxy-btn" onclick="openProxyPayment()">安全验证支付</button>
+    <button id="manual-btn" onclick="openManualPayment()">安全验证支付（需手动验证）</button>
 
     <script>
         let payUrl = "";
-        let orderNo = "";
+        let manualUrl = "";
         async function generateOrder() {
             const qq = document.getElementById("qq").value;
             const product = document.getElementById("product").value;
@@ -65,7 +63,7 @@ HTML_PAGE = '''
             const btn = document.querySelector("button");
             btn.disabled = true;
             document.getElementById('pay-btn').style.display = "none";
-            document.getElementById('proxy-btn').style.display = "none";
+            document.getElementById('manual-btn').style.display = "none";
             document.getElementById('status').innerText = "正在生成订单...";
             try {
                 const res = await fetch("/api/order", {
@@ -75,16 +73,16 @@ HTML_PAGE = '''
                 });
                 const data = await res.json();
                 if (data.success) {
-                    orderNo = data.order_no;
-                    // 优先尝试自动模式，如果后端返回了 pay_url 就用自动
                     if (data.pay_url) {
+                        // 自动模式成功，直接支付宝付款
                         payUrl = data.pay_url;
                         document.getElementById('status').innerHTML = "✅ 订单生成成功！<br>点击下方按钮付款。";
                         document.getElementById('pay-btn').style.display = "block";
-                    } else {
-                        // 自动模式失败，走代理验证模式
-                        document.getElementById('status').innerHTML = "✅ 订单已生成。<br>点击下方按钮进行安全验证。";
-                        document.getElementById('proxy-btn').style.display = "block";
+                    } else if (data.manual_url) {
+                        // 自动失败，需要手动验证
+                        manualUrl = data.manual_url;
+                        document.getElementById('status').innerHTML = "✅ 订单已生成。<br>由于安全验证，请点击下方按钮在新窗口中完成滑动验证。";
+                        document.getElementById('manual-btn').style.display = "block";
                     }
                 } else {
                     document.getElementById('status').innerText = "❌ 失败：" + data.error;
@@ -98,36 +96,13 @@ HTML_PAGE = '''
             if (!payUrl) return;
             window.open(payUrl, "_blank");
             document.getElementById('pay-btn').style.display = "none";
-            document.getElementById('status').innerHTML += '<br>✅ 已为您打开支付页面。';
+            document.getElementById('status').innerHTML += '<br>✅ 已为您打开支付宝页面，请查看新窗口。';
         }
-        function openProxyPayment() {
-            if (!orderNo) return;
-            document.getElementById('proxy-btn').disabled = true;
-            document.getElementById('status').innerText = "正在准备安全验证页面...";
-            // 请求 /pay-proxy 获取处理后的验证页面
-            fetch(`/pay-proxy?order_no=${orderNo}`)
-                .then(res => res.json())
-                .then(data => {
-                    if (data.pay_url) {
-                        // 自动成功，直接打开支付宝
-                        window.open(data.pay_url, "_blank");
-                        document.getElementById('status').innerHTML += '<br>✅ 已为您打开支付页面。';
-                    } else if (data.proxy_page) {
-                        // 需要验证，用新窗口打开代理页面
-                        const win = window.open("", "_blank");
-                        win.document.write(data.proxy_page);
-                        win.document.close();
-                        document.getElementById('status').innerHTML += '<br>🔔 验证窗口已打开，请完成滑动验证。';
-                    } else {
-                        document.getElementById('status').innerText = "❌ 失败：" + (data.error || "未知错误");
-                    }
-                })
-                .catch(e => {
-                    document.getElementById('status').innerText = "❌ 网络错误";
-                })
-                .finally(() => {
-                    document.getElementById('proxy-btn').disabled = false;
-                });
+        function openManualPayment() {
+            if (!manualUrl) return;
+            window.open(manualUrl, "_blank");
+            document.getElementById('manual-btn').style.display = "none";
+            document.getElementById('status').innerHTML += '<br>🔔 已打开验证页面，请在新窗口中完成滑动验证后自动付款。';
         }
     </script>
 </body>
@@ -173,7 +148,7 @@ def create_order():
                       headers={"Content-Type": "application/json", "X-CSRF-TOKEN": token,
                                "Referer": f"{BASE}/products/{config['product_id']}", "Origin": BASE})
         if resp.status_code != 200:
-            raise Exception(f"加购失败，状态码: {resp.status_code}, 响应: {resp.text[:100]}")
+            raise Exception(f"加购失败，状态码: {resp.status_code}")
 
         # 结算页刷新 token
         time.sleep(random.uniform(0.5, 1.5))
@@ -190,10 +165,10 @@ def create_order():
                       headers={"Content-Type": "application/json", "X-CSRF-TOKEN": token,
                                "Referer": f"{BASE}/checkout", "Origin": BASE})
         if resp.status_code not in (200, 201):
-            raise Exception(f"下单失败，状态码: {resp.status_code}, 响应: {resp.text[:100]}")
+            raise Exception(f"下单失败，状态码: {resp.status_code}")
         order_no = resp.json()['number']
 
-        # 尝试自动获取支付链接
+        # 尝试自动获取支付链接（服务器端直接请求）
         try:
             resp = s.get(f"{BASE}/orders/{order_no}/NiupayPay?type=create",
                          allow_redirects=False, headers={"Referer": f"{BASE}/checkout"})
@@ -201,52 +176,17 @@ def create_order():
                 redirect = resp.headers['Location']
                 final_resp = s.get(redirect, allow_redirects=False, headers={"Referer": BASE})
                 pay_url = final_resp.headers.get('Location', redirect)
-                return jsonify(success=True, pay_url=pay_url, order_no=order_no)
+                return jsonify(success=True, pay_url=pay_url)
         except:
             pass
 
-        # 自动失败，返回订单号给前端，由前端调用 /pay-proxy
-        return jsonify(success=True, order_no=order_no)
+        # 自动失败，提供手动验证链接
+        manual_url = f"{BASE}/orders/{order_no}/NiupayPay?type=create"
+        return jsonify(success=True, manual_url=manual_url)
 
     except Exception as e:
         traceback.print_exc()
         return jsonify(success=False, error=str(e))
-
-
-@app.route('/pay-proxy')
-def pay_proxy():
-    order_no = request.args.get('order_no')
-    if not order_no:
-        return jsonify(success=False, error='缺少订单号')
-
-    s = requests.Session()
-    s.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
-    })
-
-    try:
-        # 请求支付跳转（使用服务器的 Session，但可能仍然 IP 受限）
-        resp = s.get(f"{BASE}/orders/{order_no}/NiupayPay?type=create",
-                     allow_redirects=False, headers={"Referer": f"{BASE}/checkout"})
-        if resp.status_code in (301, 302):
-            redirect = resp.headers['Location']
-            final_resp = s.get(redirect, allow_redirects=False)
-            pay_url = final_resp.headers.get('Location', redirect)
-            return jsonify(pay_url=pay_url)
-
-        # 否则就是验证页面，需要处理成可独立打开的页面
-        html = resp.text
-        # 将页面中的相对路径资源改为绝对路径，确保新窗口打开后能正确加载 JS/CSS
-        # 简单方法：在 <head> 中添加 <base href="https://www.whquxinyong.xyz/">
-        # 但需注意页面中已有的 <base> 或绝对路径
-        if '<base' not in html:
-            html = html.replace('<head>', '<head><base href="' + BASE + '/">')
-        # 返回修改后的完整 HTML 页面，由前端写入新窗口
-        return jsonify(proxy_page=html)
-    except Exception as e:
-        traceback.print_exc()
-        return jsonify(success=False, error=str(e))
-
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
