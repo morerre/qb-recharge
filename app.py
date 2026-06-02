@@ -15,14 +15,11 @@ PRODUCTS = {
 }
 
 # ================= 代理通道配置 =================
-# 四个通道：server（直连）、proxy1、proxy2、proxy3
-# 请在下方填入对应的代理 API 提取链接
 PROXY_API = {
     "proxy1": "http://v2.api.juliangip.com/company/dynamic/getips?num=1&pt=1&result_type=text&split=1&trade_no=1241338770898758&sign=d056dad25530e29a3cd0dd97a511b267",
     "proxy2": "http://v2.api.juliangip.com/company/postpay/getips?num=1&pt=1&result_type=text&split=1&trade_no=6164279085883863&sign=68cf4e1e5b3287cbe03b06d4ea1e37e7",
     "proxy3": "http://v2.api.juliangip.com/postpay/getips?num=1&pt=1&result_type=text&split=1&trade_no=6538645717948532&sign=8e14bcedbdd1c50743cc5cda8dfb9520"   # 预留，填入新代理 API 即可激活
 }
-# 缓存设置：每个通道独立缓存，避免频繁调用 API
 _cache = {
     "proxy1": {"proxy": None, "time": 0},
     "proxy2": {"proxy": None, "time": 0},
@@ -30,19 +27,15 @@ _cache = {
 }
 
 def get_proxy(channel):
-    """根据通道获取代理，server 通道返回 None，未配置的返回 None"""
     if channel == "server":
         return None
     api_url = PROXY_API.get(channel, "")
     if not api_url:
         return None
-
     now = time.time()
     cache = _cache.get(channel, {"proxy": None, "time": 0})
-    # 如果缓存未过期（25秒内），直接使用
     if cache["proxy"] and now - cache["time"] < 25:
         return cache["proxy"]
-
     try:
         resp = requests.get(api_url, timeout=3)
         ip = resp.text.strip()
@@ -53,9 +46,19 @@ def get_proxy(channel):
             cache["time"] = now
             _cache[channel] = cache
             return proxy_dict
-    except Exception as e:
-        print(f"[代理] {channel} 获取失败: {e}", flush=True)
-    return cache["proxy"]  # 返回旧代理或 None
+    except:
+        pass
+    return cache["proxy"]
+
+# ================= 速度控制 =================
+# 若使用代理，可将延迟设为0或极小值；直连则建议保留0.5~1秒
+DELAY_CONFIG = {
+    "server": {"min": 0.5, "max": 1.5},   # 直连防止被封
+    "proxy1": {"min": 0, "max": 0.3},     # 代理可快速
+    "proxy2": {"min": 0, "max": 0.3},
+    "proxy3": {"min": 0, "max": 0.3}
+}
+REQUEST_TIMEOUT = (3, 8)   # 连接超时3秒，读取8秒
 # ============================================
 
 HTML_PAGE = '''
@@ -169,7 +172,6 @@ def create_order():
     qq = data.get('qq', '').strip()
     product = data.get('product', '5QB')
     channel = data.get('channel', 'server')
-    # 校验通道
     if channel not in ('server', 'proxy1', 'proxy2', 'proxy3'):
         channel = 'server'
 
@@ -179,6 +181,10 @@ def create_order():
     config = PRODUCTS.get(product)
     if not config:
         return jsonify(success=False, error='不支持的面额')
+
+    # 获取该通道的延迟范围
+    delay_cfg = DELAY_CONFIG.get(channel, {"min": 0, "max": 0.5})
+    d_min, d_max = delay_cfg["min"], delay_cfg["max"]
 
     try:
         s = requests.Session()
@@ -191,55 +197,54 @@ def create_order():
             "Accept-Language": "zh-CN,zh;q=0.9",
         })
 
-        # 获取所选通道的代理（server 或未配置的代理返回 None）
         proxy = get_proxy(channel)
 
         # 获取 token
-        resp = s.get(f"{BASE}/products/{config['product_id']}", proxies=proxy)
+        resp = s.get(f"{BASE}/products/{config['product_id']}", proxies=proxy, timeout=REQUEST_TIMEOUT)
         soup = BeautifulSoup(resp.text, 'html.parser')
         token = soup.find('meta', {'name': 'csrf-token'})['content']
 
         # 加购
-        time.sleep(random.uniform(1, 2))
+        time.sleep(random.uniform(d_min, d_max))
         resp = s.post(f"{BASE}/carts",
                       json={"sku_id": config['sku_id'], "quantity": 1, "buy_now": False},
                       headers={"Content-Type": "application/json", "X-CSRF-TOKEN": token,
                                "Referer": f"{BASE}/products/{config['product_id']}", "Origin": BASE},
-                      proxies=proxy)
+                      proxies=proxy, timeout=REQUEST_TIMEOUT)
         if resp.status_code != 200:
             raise Exception(f"加购失败，状态码: {resp.status_code}")
 
         # 结算页刷新 token
-        time.sleep(random.uniform(0.5, 1.5))
-        resp = s.get(f"{BASE}/checkout", proxies=proxy)
+        time.sleep(random.uniform(d_min, d_max))
+        resp = s.get(f"{BASE}/checkout", proxies=proxy, timeout=REQUEST_TIMEOUT)
         soup = BeautifulSoup(resp.text, 'html.parser')
         token_meta = soup.find('meta', {'name': 'csrf-token'})
         if token_meta:
             token = token_meta['content']
 
         # 下单
-        time.sleep(random.uniform(1, 2))
+        time.sleep(random.uniform(d_min, d_max))
         resp = s.post(f"{BASE}/checkout/confirm",
                       json={"comment": "", "qq": qq},
                       headers={"Content-Type": "application/json", "X-CSRF-TOKEN": token,
                                "Referer": f"{BASE}/checkout", "Origin": BASE},
-                      proxies=proxy)
+                      proxies=proxy, timeout=REQUEST_TIMEOUT)
         if resp.status_code not in (200, 201):
             raise Exception(f"下单失败，状态码: {resp.status_code}")
         order_no = resp.json()['number']
 
-        # 获取支付链接（重新获取新代理，保证支付 IP 新鲜）
+        # 获取支付链接（重新拿新代理，保证新鲜）
         pay_proxy = get_proxy(channel)
         resp = s.get(f"{BASE}/orders/{order_no}/NiupayPay?type=create",
                      allow_redirects=False, headers={"Referer": f"{BASE}/checkout"},
-                     proxies=pay_proxy, timeout=(5, 10))
+                     proxies=pay_proxy, timeout=REQUEST_TIMEOUT)
         if resp.status_code in (301, 302):
             redirect = resp.headers['Location']
-            final_resp = s.get(redirect, allow_redirects=False, headers={"Referer": BASE}, proxies=pay_proxy)
+            final_resp = s.get(redirect, allow_redirects=False, headers={"Referer": BASE},
+                               proxies=pay_proxy, timeout=REQUEST_TIMEOUT)
             pay_url = final_resp.headers.get('Location', redirect)
             return jsonify(success=True, pay_url=pay_url)
         else:
-            # 自动失败，提供手动链接
             manual_url = f"{BASE}/orders/{order_no}/NiupayPay?type=create"
             return jsonify(success=True, manual_url=manual_url)
 
