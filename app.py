@@ -2,6 +2,8 @@ from flask import Flask, request, jsonify, render_template_string
 import requests
 from bs4 import BeautifulSoup
 import os
+import traceback
+
 app = Flask(__name__)
 
 BASE = "https://www.whquxinyong.xyz"
@@ -25,8 +27,8 @@ HTML_PAGE = '''
             padding: 10px;
             margin: 8px 0;
             font-size: 16px;
-            box-sizing: border-box; /* 关键：padding 不会撑宽 */
-            border: 1px solid #ccc;   /* 统一边框，保证一样宽 */
+            box-sizing: border-box;
+            border: 1px solid #ccc;
         }
         button { background: #1677ff; color: white; border: none; border-radius: 6px; cursor: pointer; }
         button:disabled { background: #aaa; }
@@ -79,7 +81,6 @@ HTML_PAGE = '''
         function openPayment() {
             if (!payUrl) return;
             window.open(payUrl, "_blank");
-            // 点击后隐藏按钮，并显示提示
             document.getElementById('pay-btn').style.display = "none";
             document.getElementById('status').innerHTML += '<br>✅ 已为您打开支付页面，请查看浏览器新窗口。';
         }
@@ -151,6 +152,8 @@ def create_order():
 
         return jsonify(success=True, pay_url=pay_url)
     except Exception as e:
+        # 打印完整错误堆栈到标准错误输出（systemd 日志会捕获）
+        traceback.print_exc()
         return jsonify(success=False, error=str(e))
 
 if __name__ == '__main__':
