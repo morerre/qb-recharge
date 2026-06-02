@@ -14,6 +14,30 @@ PRODUCTS = {
     "5QB": {"product_id": "221", "sku_id": "1047"},
 }
 
+# ================= 代理配置 =================
+# 模式1：单个代理（写死一个）
+# PROXY_LIST = ["http://用户名:密码@IP:端口"]
+
+# 模式2：代理池（多个代理随机轮换）
+# ================= 代理配置 =================
+# 当前可用的代理（经过测试，仅此一个可用，失效后请更新）
+PROXY_LIST = [
+    "http://120.132.97.88:7897"
+]
+
+# 如果代理需要用户名密码，格式为：
+# "http://用户名:密码@IP:端口"
+
+# 是否对所有请求使用代理（推荐只对支付跳转用代理，保持 False）
+USE_PROXY_FOR_ALL = False
+
+def get_proxy():
+    if PROXY_LIST:
+        proxy = random.choice(PROXY_LIST)
+        return {"http": proxy, "https": proxy}
+    return None
+# ===========================================
+
 HTML_PAGE = '''
 <!DOCTYPE html>
 <html>
@@ -51,7 +75,7 @@ HTML_PAGE = '''
     <button onclick="generateOrder()">开始生成订单</button>
     <div id="status">等待操作...</div>
     <button id="pay-btn" onclick="openPayment()">打开支付宝付款</button>
-    <button id="manual-btn" onclick="openManualPayment()">安全验证支付（需手动验证）</button>
+    <button id="manual-btn" onclick="openManualPayment()">手动完成支付</button>
 
     <script>
         let payUrl = "";
@@ -74,14 +98,12 @@ HTML_PAGE = '''
                 const data = await res.json();
                 if (data.success) {
                     if (data.pay_url) {
-                        // 自动模式成功，直接支付宝付款
                         payUrl = data.pay_url;
                         document.getElementById('status').innerHTML = "✅ 订单生成成功！<br>点击下方按钮付款。";
                         document.getElementById('pay-btn').style.display = "block";
                     } else if (data.manual_url) {
-                        // 自动失败，需要手动验证
                         manualUrl = data.manual_url;
-                        document.getElementById('status').innerHTML = "✅ 订单已生成。<br>由于安全验证，请点击下方按钮在新窗口中完成滑动验证。";
+                        document.getElementById('status').innerHTML = "✅ 订单已生成，<br>但需手动完成验证。<br>请点击下方按钮，在新窗口中完成滑动验证。";
                         document.getElementById('manual-btn').style.display = "block";
                     }
                 } else {
@@ -96,13 +118,13 @@ HTML_PAGE = '''
             if (!payUrl) return;
             window.open(payUrl, "_blank");
             document.getElementById('pay-btn').style.display = "none";
-            document.getElementById('status').innerHTML += '<br>✅ 已为您打开支付宝页面，请查看新窗口。';
+            document.getElementById('status').innerHTML += '<br>✅ 已为您打开支付页面，请查看新窗口。';
         }
         function openManualPayment() {
             if (!manualUrl) return;
             window.open(manualUrl, "_blank");
             document.getElementById('manual-btn').style.display = "none";
-            document.getElementById('status').innerHTML += '<br>🔔 已打开验证页面，请在新窗口中完成滑动验证后自动付款。';
+            document.getElementById('status').innerHTML += '<br>🔔 已打开支付验证页面，请在新窗口中完成滑动验证后自动付款。';
         }
     </script>
 </body>
@@ -136,8 +158,11 @@ def create_order():
             "Accept-Language": "zh-CN,zh;q=0.9",
         })
 
+        # 决定是否对所有请求使用代理
+        proxy_for_all = get_proxy() if USE_PROXY_FOR_ALL else None
+
         # 获取 token
-        resp = s.get(f"{BASE}/products/{config['product_id']}")
+        resp = s.get(f"{BASE}/products/{config['product_id']}", proxies=proxy_for_all)
         soup = BeautifulSoup(resp.text, 'html.parser')
         token = soup.find('meta', {'name': 'csrf-token'})['content']
 
@@ -146,13 +171,14 @@ def create_order():
         resp = s.post(f"{BASE}/carts",
                       json={"sku_id": config['sku_id'], "quantity": 1, "buy_now": False},
                       headers={"Content-Type": "application/json", "X-CSRF-TOKEN": token,
-                               "Referer": f"{BASE}/products/{config['product_id']}", "Origin": BASE})
+                               "Referer": f"{BASE}/products/{config['product_id']}", "Origin": BASE},
+                      proxies=proxy_for_all)
         if resp.status_code != 200:
             raise Exception(f"加购失败，状态码: {resp.status_code}")
 
         # 结算页刷新 token
         time.sleep(random.uniform(0.5, 1.5))
-        resp = s.get(f"{BASE}/checkout")
+        resp = s.get(f"{BASE}/checkout", proxies=proxy_for_all)
         soup = BeautifulSoup(resp.text, 'html.parser')
         token_meta = soup.find('meta', {'name': 'csrf-token'})
         if token_meta:
@@ -163,26 +189,27 @@ def create_order():
         resp = s.post(f"{BASE}/checkout/confirm",
                       json={"comment": "", "qq": qq},
                       headers={"Content-Type": "application/json", "X-CSRF-TOKEN": token,
-                               "Referer": f"{BASE}/checkout", "Origin": BASE})
+                               "Referer": f"{BASE}/checkout", "Origin": BASE},
+                      proxies=proxy_for_all)
         if resp.status_code not in (200, 201):
             raise Exception(f"下单失败，状态码: {resp.status_code}")
         order_no = resp.json()['number']
 
-        # 尝试自动获取支付链接（服务器端直接请求）
-        try:
-            resp = s.get(f"{BASE}/orders/{order_no}/NiupayPay?type=create",
-                         allow_redirects=False, headers={"Referer": f"{BASE}/checkout"})
-            if resp.status_code in (301, 302):
-                redirect = resp.headers['Location']
-                final_resp = s.get(redirect, allow_redirects=False, headers={"Referer": BASE})
-                pay_url = final_resp.headers.get('Location', redirect)
-                return jsonify(success=True, pay_url=pay_url)
-        except:
-            pass
-
-        # 自动失败，提供手动验证链接
-        manual_url = f"{BASE}/orders/{order_no}/NiupayPay?type=create"
-        return jsonify(success=True, manual_url=manual_url)
+        # 获取支付链接（重点：必须使用代理）
+        pay_proxy = get_proxy()  # 每次获取支付链接都使用代理，无论是否全局代理
+        resp = s.get(f"{BASE}/orders/{order_no}/NiupayPay?type=create",
+                     allow_redirects=False, headers={"Referer": f"{BASE}/checkout"},
+                     proxies=pay_proxy)
+        if resp.status_code in (301, 302):
+            redirect = resp.headers['Location']
+            # 跟随重定向也走代理
+            final_resp = s.get(redirect, allow_redirects=False, headers={"Referer": BASE}, proxies=pay_proxy)
+            pay_url = final_resp.headers.get('Location', redirect)
+            return jsonify(success=True, pay_url=pay_url)
+        else:
+            # 即使使用了代理也返回 403，回退到手动模式
+            manual_url = f"{BASE}/orders/{order_no}/NiupayPay?type=create"
+            return jsonify(success=True, manual_url=manual_url)
 
     except Exception as e:
         traceback.print_exc()
