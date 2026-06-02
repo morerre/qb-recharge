@@ -17,15 +17,13 @@ PRODUCTS = {
 # ================= 动态代理配置 =================
 PROXY_API_URL = "http://v2.api.juliangip.com/postpay/getips?num=1&pt=1&result_type=text&split=1&trade_no=6538645717948532&sign=8e14bcedbdd1c50743cc5cda8dfb9520"
 
-# 缓存最近一次代理，避免频繁调用API（30秒有效期）
 _last_proxy = None
 _last_proxy_time = 0
 
 def get_proxy():
-    """获取一个动态代理 IP，返回 requests 格式的代理字典，失败返回 None"""
     global _last_proxy, _last_proxy_time
-    # 如果代理缓存未过期（30秒内），直接使用
     if _last_proxy and time.time() - _last_proxy_time < 25:
+        print(f"[代理] 使用缓存的代理: {_last_proxy}")
         return _last_proxy
     try:
         resp = requests.get(PROXY_API_URL, timeout=3)
@@ -34,13 +32,14 @@ def get_proxy():
             proxy_url = f"http://{ip}"
             _last_proxy = {"http": proxy_url, "https": proxy_url}
             _last_proxy_time = time.time()
+            print(f"[代理] 获取到新 IP: {ip}")
             return _last_proxy
-    except:
-        pass
-    # 失败返回 None，后续逻辑会降级
+        else:
+            print(f"[代理] API 返回异常: {ip}")
+    except Exception as e:
+        print(f"[代理] 获取失败: {e}")
     return None
 
-# 是否对所有请求使用代理（默认 False，只对支付跳转用代理）
 USE_PROXY_FOR_ALL = False
 # ============================================
 
@@ -162,9 +161,17 @@ def create_order():
         s.headers.update({
             "User-Agent": random.choice(user_agents),
             "Accept-Language": "zh-CN,zh;q=0.9",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+            "Cache-Control": "max-age=0",
         })
 
-        # 决定是否对所有请求使用代理（全局开关）
         base_proxy = get_proxy() if USE_PROXY_FOR_ALL else None
 
         # 获取 token
@@ -201,18 +208,35 @@ def create_order():
             raise Exception(f"下单失败，状态码: {resp.status_code}")
         order_no = resp.json()['number']
 
-        # 获取支付链接（这里专门用新代理）
-        pay_proxy = get_proxy()  # 每次支付跳转都尝试获取新代理
+        # 获取支付链接（强制使用新代理）
+        pay_proxy = get_proxy()
+        print(f"[支付] 准备使用代理: {pay_proxy}")
+        # 模拟更真实的浏览器请求
+        pay_headers = {
+            "User-Agent": random.choice(user_agents),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9",
+            "Referer": f"{BASE}/checkout",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "same-origin",
+            "Sec-Fetch-User": "?1",
+            "Cache-Control": "max-age=0",
+        }
         resp = s.get(f"{BASE}/orders/{order_no}/NiupayPay?type=create",
-                     allow_redirects=False, headers={"Referer": f"{BASE}/checkout"},
+                     allow_redirects=False, headers=pay_headers,
                      proxies=pay_proxy)
+        print(f"[支付] 状态码: {resp.status_code}")
         if resp.status_code in (301, 302):
             redirect = resp.headers['Location']
             final_resp = s.get(redirect, allow_redirects=False, headers={"Referer": BASE}, proxies=pay_proxy)
             pay_url = final_resp.headers.get('Location', redirect)
+            print(f"[支付] 成功获取支付链接: {pay_url}")
             return jsonify(success=True, pay_url=pay_url)
         else:
-            # 代理也失败，回退手动模式
+            print(f"[支付] 失败，响应内容(前300字): {resp.text[:300]}")
             manual_url = f"{BASE}/orders/{order_no}/NiupayPay?type=create"
             return jsonify(success=True, manual_url=manual_url)
 
