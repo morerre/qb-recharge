@@ -15,7 +15,7 @@ PRODUCTS = {
 }
 
 # ================= 动态代理配置 =================
-PROXY_API_URL = "http://v2.api.juliangip.com/postpay/getips?num=1&pt=1&result_type=text&split=1&trade_no=6538645717948532&sign=8e14bcedbdd1c50743cc5cda8dfb9520"
+PROXY_API_URL = "http://v2.api.juliangip.com/company/dynamic/getips?num=1&pt=1&result_type=text&split=1&trade_no=1241338770898758&sign=d056dad25530e29a3cd0dd97a511b267"
 
 _last_proxy = None
 _last_proxy_time = 0
