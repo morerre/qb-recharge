@@ -53,14 +53,13 @@ def get_proxy(channel):
 # ================= 速度控制 =================
 # 若使用代理，可将延迟设为0或极小值；直连则建议保留0.5~1秒
 DELAY_CONFIG = {
-    "server": {"min": 0.5, "max": 1.5},   # 直连防止被封
+    "server": {"min": 0.1, "max": 0.5},   # 直连防止被封
     "proxy1": {"min": 0, "max": 0.3},     # 代理可快速
     "proxy2": {"min": 0, "max": 0.3},
     "proxy3": {"min": 0, "max": 0.3}
 }
 REQUEST_TIMEOUT = (3, 8)   # 连接超时3秒，读取8秒
 # ============================================
-
 HTML_PAGE = '''
 <!DOCTYPE html>
 <html>
@@ -81,9 +80,8 @@ HTML_PAGE = '''
         }
         button { background: #1677ff; color: white; border: none; border-radius: 6px; cursor: pointer; }
         button:disabled { background: #aaa; }
-        #status { margin-top: 15px; padding: 10px; background: #f0f0f0; border-radius: 6px; }
+        #status { margin-top: 15px; padding: 10px; background: #f0f0f0; border-radius: 6px; font-size: 14px; }
         #pay-btn { background: #52c41a; display: none; }
-        #manual-btn { background: #fa8c16; display: none; }
     </style>
 </head>
 <body>
@@ -103,13 +101,11 @@ HTML_PAGE = '''
         <option value="proxy3">(0.0012一条)代理 3</option>
     </select>
     <button onclick="generateOrder()">开始生成订单</button>
+    <button id="pay-btn" onclick="goToPay()">前往支付</button>
     <div id="status">等待操作...</div>
-    <button id="pay-btn" onclick="openPayment()">打开支付宝付款</button>
-    <button id="manual-btn" onclick="openManualPayment()">手动完成支付</button>
 
     <script>
-        let payUrl = "";
-        let manualUrl = "";
+        let currentPayUrl = "";   // 可能是支付宝链接，也可能是手动验证链接
         async function generateOrder() {
             const qq = document.getElementById("qq").value;
             const product = document.getElementById("product").value;
@@ -118,7 +114,6 @@ HTML_PAGE = '''
             const btn = document.querySelector("button");
             btn.disabled = true;
             document.getElementById('pay-btn').style.display = "none";
-            document.getElementById('manual-btn').style.display = "none";
             document.getElementById('status').innerText = "正在生成订单...";
             try {
                 const res = await fetch("/api/order", {
@@ -128,14 +123,17 @@ HTML_PAGE = '''
                 });
                 const data = await res.json();
                 if (data.success) {
-                    if (data.pay_url) {
-                        payUrl = data.pay_url;
-                        document.getElementById('status').innerHTML = "✅ 订单生成成功！<br>点击下方按钮付款。";
+                    // 统一保存链接：pay_url 或 manual_url
+                    currentPayUrl = data.pay_url || data.manual_url || "";
+                    if (currentPayUrl) {
                         document.getElementById('pay-btn').style.display = "block";
-                    } else if (data.manual_url) {
-                        manualUrl = data.manual_url;
-                        document.getElementById('status').innerHTML = "✅ 订单已生成，<br>但需手动完成验证。<br>请点击下方按钮，在新窗口中完成滑动验证。";
-                        document.getElementById('manual-btn').style.display = "block";
+                        if (data.pay_url) {
+                            document.getElementById('status').innerHTML = "✅ 订单生成成功，点击下方按钮付款。";
+                        } else {
+                            document.getElementById('status').innerHTML = "✅ 订单已生成，需手动完成验证。<br>点击下方按钮，在新窗口中完成滑动验证后付款。";
+                        }
+                    } else {
+                        document.getElementById('status').innerText = "❌ 失败：未获取到支付链接";
                     }
                 } else {
                     document.getElementById('status').innerText = "❌ 失败：" + data.error;
@@ -145,17 +143,12 @@ HTML_PAGE = '''
             }
             btn.disabled = false;
         }
-        function openPayment() {
-            if (!payUrl) return;
-            window.open(payUrl, "_blank");
+        function goToPay() {
+            if (!currentPayUrl) return;
+            window.open(currentPayUrl, "_blank");
+            // 点击后按钮隐藏，给出提示
             document.getElementById('pay-btn').style.display = "none";
-            document.getElementById('status').innerHTML += '<br>✅ 已为您打开支付宝页面，请查看新窗口。';
-        }
-        function openManualPayment() {
-            if (!manualUrl) return;
-            window.open(manualUrl, "_blank");
-            document.getElementById('manual-btn').style.display = "none";
-            document.getElementById('status').innerHTML += '<br>🔔 已打开验证页面，请在新窗口中完成滑动验证后自动付款。';
+            document.getElementById('status').innerHTML += '<br>✅ 已为您打开支付页面，请查看新窗口。';
         }
     </script>
 </body>
