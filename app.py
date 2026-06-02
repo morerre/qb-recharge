@@ -14,33 +14,48 @@ PRODUCTS = {
     "5QB": {"product_id": "221", "sku_id": "1047"},
 }
 
-# ================= 动态代理配置 =================
-PROXY_API_URL = "http://v2.api.juliangip.com/company/dynamic/getips?num=1&pt=1&result_type=text&split=1&trade_no=1241338770898758&sign=d056dad25530e29a3cd0dd97a511b267"
+# ================= 代理通道配置 =================
+# 四个通道：server（直连）、proxy1、proxy2、proxy3
+# 请在下方填入对应的代理 API 提取链接
+PROXY_API = {
+    "proxy1": "http://v2.api.juliangip.com/company/dynamic/getips?num=1&pt=1&result_type=text&split=1&trade_no=1241338770898758&sign=d056dad25530e29a3cd0dd97a511b267",
+    "proxy2": "http://v2.api.juliangip.com/company/postpay/getips?num=1&pt=1&result_type=text&split=1&trade_no=6164279085883863&sign=68cf4e1e5b3287cbe03b06d4ea1e37e7",
+    "proxy3": "http://v2.api.juliangip.com/postpay/getips?num=1&pt=1&result_type=text&split=1&trade_no=6538645717948532&sign=8e14bcedbdd1c50743cc5cda8dfb9520"   # 预留，填入新代理 API 即可激活
+}
+# 缓存设置：每个通道独立缓存，避免频繁调用 API
+_cache = {
+    "proxy1": {"proxy": None, "time": 0},
+    "proxy2": {"proxy": None, "time": 0},
+    "proxy3": {"proxy": None, "time": 0}
+}
 
-_last_proxy = None
-_last_proxy_time = 0
+def get_proxy(channel):
+    """根据通道获取代理，server 通道返回 None，未配置的返回 None"""
+    if channel == "server":
+        return None
+    api_url = PROXY_API.get(channel, "")
+    if not api_url:
+        return None
 
-def get_proxy():
-    global _last_proxy, _last_proxy_time
-    if _last_proxy and time.time() - _last_proxy_time < 25:
-        print(f"[代理] 使用缓存的代理: {_last_proxy}")
-        return _last_proxy
+    now = time.time()
+    cache = _cache.get(channel, {"proxy": None, "time": 0})
+    # 如果缓存未过期（25秒内），直接使用
+    if cache["proxy"] and now - cache["time"] < 25:
+        return cache["proxy"]
+
     try:
-        resp = requests.get(PROXY_API_URL, timeout=3)
+        resp = requests.get(api_url, timeout=3)
         ip = resp.text.strip()
         if ip and ':' in ip:
             proxy_url = f"http://{ip}"
-            _last_proxy = {"http": proxy_url, "https": proxy_url}
-            _last_proxy_time = time.time()
-            print(f"[代理] 获取到新 IP: {ip}")
-            return _last_proxy
-        else:
-            print(f"[代理] API 返回异常: {ip}")
+            proxy_dict = {"http": proxy_url, "https": proxy_url}
+            cache["proxy"] = proxy_dict
+            cache["time"] = now
+            _cache[channel] = cache
+            return proxy_dict
     except Exception as e:
-        print(f"[代理] 获取失败: {e}")
-    return None
-
-USE_PROXY_FOR_ALL = False
+        print(f"[代理] {channel} 获取失败: {e}", flush=True)
+    return cache["proxy"]  # 返回旧代理或 None
 # ============================================
 
 HTML_PAGE = '''
@@ -77,6 +92,13 @@ HTML_PAGE = '''
         <option value="5QB">5QB</option>
         <option value="1QB">1QB</option>
     </select>
+    <label>代理通道：</label>
+    <select id="channel">
+        <option value="server" selected>服务器直连</option>
+        <option value="proxy1">(目前免费)代理 1</option>
+        <option value="proxy2">(0.005一条)代理 2</option>
+        <option value="proxy3">(0.0012一条)代理 3</option>
+    </select>
     <button onclick="generateOrder()">开始生成订单</button>
     <div id="status">等待操作...</div>
     <button id="pay-btn" onclick="openPayment()">打开支付宝付款</button>
@@ -88,6 +110,7 @@ HTML_PAGE = '''
         async function generateOrder() {
             const qq = document.getElementById("qq").value;
             const product = document.getElementById("product").value;
+            const channel = document.getElementById("channel").value;
             if (!/^\d{5,}$/.test(qq)) { alert("请输入有效QQ号"); return; }
             const btn = document.querySelector("button");
             btn.disabled = true;
@@ -98,7 +121,7 @@ HTML_PAGE = '''
                 const res = await fetch("/api/order", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ qq, product })
+                    body: JSON.stringify({ qq, product, channel })
                 });
                 const data = await res.json();
                 if (data.success) {
@@ -145,6 +168,11 @@ def create_order():
     data = request.get_json()
     qq = data.get('qq', '').strip()
     product = data.get('product', '5QB')
+    channel = data.get('channel', 'server')
+    # 校验通道
+    if channel not in ('server', 'proxy1', 'proxy2', 'proxy3'):
+        channel = 'server'
+
     if not qq or not qq.isdigit():
         return jsonify(success=False, error='QQ号格式错误')
 
@@ -161,21 +189,13 @@ def create_order():
         s.headers.update({
             "User-Agent": random.choice(user_agents),
             "Accept-Language": "zh-CN,zh;q=0.9",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "none",
-            "Sec-Fetch-User": "?1",
-            "Cache-Control": "max-age=0",
         })
 
-        base_proxy = get_proxy() if USE_PROXY_FOR_ALL else None
+        # 获取所选通道的代理（server 或未配置的代理返回 None）
+        proxy = get_proxy(channel)
 
         # 获取 token
-        resp = s.get(f"{BASE}/products/{config['product_id']}", proxies=base_proxy)
+        resp = s.get(f"{BASE}/products/{config['product_id']}", proxies=proxy)
         soup = BeautifulSoup(resp.text, 'html.parser')
         token = soup.find('meta', {'name': 'csrf-token'})['content']
 
@@ -185,13 +205,13 @@ def create_order():
                       json={"sku_id": config['sku_id'], "quantity": 1, "buy_now": False},
                       headers={"Content-Type": "application/json", "X-CSRF-TOKEN": token,
                                "Referer": f"{BASE}/products/{config['product_id']}", "Origin": BASE},
-                      proxies=base_proxy)
+                      proxies=proxy)
         if resp.status_code != 200:
             raise Exception(f"加购失败，状态码: {resp.status_code}")
 
         # 结算页刷新 token
         time.sleep(random.uniform(0.5, 1.5))
-        resp = s.get(f"{BASE}/checkout", proxies=base_proxy)
+        resp = s.get(f"{BASE}/checkout", proxies=proxy)
         soup = BeautifulSoup(resp.text, 'html.parser')
         token_meta = soup.find('meta', {'name': 'csrf-token'})
         if token_meta:
@@ -203,40 +223,23 @@ def create_order():
                       json={"comment": "", "qq": qq},
                       headers={"Content-Type": "application/json", "X-CSRF-TOKEN": token,
                                "Referer": f"{BASE}/checkout", "Origin": BASE},
-                      proxies=base_proxy)
+                      proxies=proxy)
         if resp.status_code not in (200, 201):
             raise Exception(f"下单失败，状态码: {resp.status_code}")
         order_no = resp.json()['number']
 
-        # 获取支付链接（强制使用新代理）
-        pay_proxy = get_proxy()
-        print(f"[支付] 准备使用代理: {pay_proxy}")
-        # 模拟更真实的浏览器请求
-        pay_headers = {
-            "User-Agent": random.choice(user_agents),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-            "Accept-Language": "zh-CN,zh;q=0.9",
-            "Referer": f"{BASE}/checkout",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "same-origin",
-            "Sec-Fetch-User": "?1",
-            "Cache-Control": "max-age=0",
-        }
+        # 获取支付链接（重新获取新代理，保证支付 IP 新鲜）
+        pay_proxy = get_proxy(channel)
         resp = s.get(f"{BASE}/orders/{order_no}/NiupayPay?type=create",
-                     allow_redirects=False, headers=pay_headers,
-                     proxies=pay_proxy)
-        print(f"[支付] 状态码: {resp.status_code}")
+                     allow_redirects=False, headers={"Referer": f"{BASE}/checkout"},
+                     proxies=pay_proxy, timeout=(5, 10))
         if resp.status_code in (301, 302):
             redirect = resp.headers['Location']
             final_resp = s.get(redirect, allow_redirects=False, headers={"Referer": BASE}, proxies=pay_proxy)
             pay_url = final_resp.headers.get('Location', redirect)
-            print(f"[支付] 成功获取支付链接: {pay_url}")
             return jsonify(success=True, pay_url=pay_url)
         else:
-            print(f"[支付] 失败，响应内容(前300字): {resp.text[:300]}")
+            # 自动失败，提供手动链接
             manual_url = f"{BASE}/orders/{order_no}/NiupayPay?type=create"
             return jsonify(success=True, manual_url=manual_url)
 
