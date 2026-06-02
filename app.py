@@ -14,29 +14,35 @@ PRODUCTS = {
     "5QB": {"product_id": "221", "sku_id": "1047"},
 }
 
-# ================= 代理配置 =================
-# 模式1：单个代理（写死一个）
-# PROXY_LIST = ["http://用户名:密码@IP:端口"]
+# ================= 动态代理配置 =================
+PROXY_API_URL = "http://v2.api.juliangip.com/postpay/getips?num=1&pt=1&result_type=text&split=1&trade_no=6538645717948532&sign=8e14bcedbdd1c50743cc5cda8dfb9520"
 
-# 模式2：代理池（多个代理随机轮换）
-# ================= 代理配置 =================
-# 当前可用的代理（经过测试，仅此一个可用，失效后请更新）
-PROXY_LIST = [
-    "http://120.132.97.88:7897"
-]
-
-# 如果代理需要用户名密码，格式为：
-# "http://用户名:密码@IP:端口"
-
-# 是否对所有请求使用代理（推荐只对支付跳转用代理，保持 False）
-USE_PROXY_FOR_ALL = False
+# 缓存最近一次代理，避免频繁调用API（30秒有效期）
+_last_proxy = None
+_last_proxy_time = 0
 
 def get_proxy():
-    if PROXY_LIST:
-        proxy = random.choice(PROXY_LIST)
-        return {"http": proxy, "https": proxy}
+    """获取一个动态代理 IP，返回 requests 格式的代理字典，失败返回 None"""
+    global _last_proxy, _last_proxy_time
+    # 如果代理缓存未过期（30秒内），直接使用
+    if _last_proxy and time.time() - _last_proxy_time < 25:
+        return _last_proxy
+    try:
+        resp = requests.get(PROXY_API_URL, timeout=3)
+        ip = resp.text.strip()
+        if ip and ':' in ip:
+            proxy_url = f"http://{ip}"
+            _last_proxy = {"http": proxy_url, "https": proxy_url}
+            _last_proxy_time = time.time()
+            return _last_proxy
+    except:
+        pass
+    # 失败返回 None，后续逻辑会降级
     return None
-# ===========================================
+
+# 是否对所有请求使用代理（默认 False，只对支付跳转用代理）
+USE_PROXY_FOR_ALL = False
+# ============================================
 
 HTML_PAGE = '''
 <!DOCTYPE html>
@@ -118,13 +124,13 @@ HTML_PAGE = '''
             if (!payUrl) return;
             window.open(payUrl, "_blank");
             document.getElementById('pay-btn').style.display = "none";
-            document.getElementById('status').innerHTML += '<br>✅ 已为您打开支付页面，请查看新窗口。';
+            document.getElementById('status').innerHTML += '<br>✅ 已为您打开支付宝页面，请查看新窗口。';
         }
         function openManualPayment() {
             if (!manualUrl) return;
             window.open(manualUrl, "_blank");
             document.getElementById('manual-btn').style.display = "none";
-            document.getElementById('status').innerHTML += '<br>🔔 已打开支付验证页面，请在新窗口中完成滑动验证后自动付款。';
+            document.getElementById('status').innerHTML += '<br>🔔 已打开验证页面，请在新窗口中完成滑动验证后自动付款。';
         }
     </script>
 </body>
@@ -158,11 +164,11 @@ def create_order():
             "Accept-Language": "zh-CN,zh;q=0.9",
         })
 
-        # 决定是否对所有请求使用代理
-        proxy_for_all = get_proxy() if USE_PROXY_FOR_ALL else None
+        # 决定是否对所有请求使用代理（全局开关）
+        base_proxy = get_proxy() if USE_PROXY_FOR_ALL else None
 
         # 获取 token
-        resp = s.get(f"{BASE}/products/{config['product_id']}", proxies=proxy_for_all)
+        resp = s.get(f"{BASE}/products/{config['product_id']}", proxies=base_proxy)
         soup = BeautifulSoup(resp.text, 'html.parser')
         token = soup.find('meta', {'name': 'csrf-token'})['content']
 
@@ -172,13 +178,13 @@ def create_order():
                       json={"sku_id": config['sku_id'], "quantity": 1, "buy_now": False},
                       headers={"Content-Type": "application/json", "X-CSRF-TOKEN": token,
                                "Referer": f"{BASE}/products/{config['product_id']}", "Origin": BASE},
-                      proxies=proxy_for_all)
+                      proxies=base_proxy)
         if resp.status_code != 200:
             raise Exception(f"加购失败，状态码: {resp.status_code}")
 
         # 结算页刷新 token
         time.sleep(random.uniform(0.5, 1.5))
-        resp = s.get(f"{BASE}/checkout", proxies=proxy_for_all)
+        resp = s.get(f"{BASE}/checkout", proxies=base_proxy)
         soup = BeautifulSoup(resp.text, 'html.parser')
         token_meta = soup.find('meta', {'name': 'csrf-token'})
         if token_meta:
@@ -190,24 +196,23 @@ def create_order():
                       json={"comment": "", "qq": qq},
                       headers={"Content-Type": "application/json", "X-CSRF-TOKEN": token,
                                "Referer": f"{BASE}/checkout", "Origin": BASE},
-                      proxies=proxy_for_all)
+                      proxies=base_proxy)
         if resp.status_code not in (200, 201):
             raise Exception(f"下单失败，状态码: {resp.status_code}")
         order_no = resp.json()['number']
 
-        # 获取支付链接（重点：必须使用代理）
-        pay_proxy = get_proxy()  # 每次获取支付链接都使用代理，无论是否全局代理
+        # 获取支付链接（这里专门用新代理）
+        pay_proxy = get_proxy()  # 每次支付跳转都尝试获取新代理
         resp = s.get(f"{BASE}/orders/{order_no}/NiupayPay?type=create",
                      allow_redirects=False, headers={"Referer": f"{BASE}/checkout"},
                      proxies=pay_proxy)
         if resp.status_code in (301, 302):
             redirect = resp.headers['Location']
-            # 跟随重定向也走代理
             final_resp = s.get(redirect, allow_redirects=False, headers={"Referer": BASE}, proxies=pay_proxy)
             pay_url = final_resp.headers.get('Location', redirect)
             return jsonify(success=True, pay_url=pay_url)
         else:
-            # 即使使用了代理也返回 403，回退到手动模式
+            # 代理也失败，回退手动模式
             manual_url = f"{BASE}/orders/{order_no}/NiupayPay?type=create"
             return jsonify(success=True, manual_url=manual_url)
 
