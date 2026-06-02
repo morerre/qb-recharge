@@ -148,7 +148,7 @@ def create_order():
             final_resp = s.get(redirect, allow_redirects=False, headers={"Referer": BASE})
             pay_url = final_resp.headers.get('Location', redirect)
         else:
-            error_detail = f"支付跳转失败，状态码: {resp.status_code}, 响应: {resp.text[:200]}"
+            error_detail = f"支付跳转失败，状态码: {resp.status_code}, 响应: {resp.text}"
             raise Exception(error_detail)
 
         return jsonify(success=True, pay_url=pay_url)
