@@ -122,7 +122,7 @@ def create_order():
                       headers={"Content-Type": "application/json", "X-CSRF-TOKEN": token,
                                "Referer": f"{BASE}/products/{config['product_id']}", "Origin": BASE})
         if resp.status_code != 200:
-            raise Exception("加购失败")
+            raise Exception(f"加购失败，状态码: {resp.status_code}, 响应: {resp.text[:100]}")
 
         # 结算页刷新token
         resp = s.get(f"{BASE}/checkout")
@@ -137,7 +137,7 @@ def create_order():
                       headers={"Content-Type": "application/json", "X-CSRF-TOKEN": token,
                                "Referer": f"{BASE}/checkout", "Origin": BASE})
         if resp.status_code not in (200, 201):
-            raise Exception("下单失败")
+            raise Exception(f"下单失败，状态码: {resp.status_code}, 响应: {resp.text[:100]}")
         order_no = resp.json()['number']
 
         # 获取支付链接
@@ -148,11 +148,11 @@ def create_order():
             final_resp = s.get(redirect, allow_redirects=False, headers={"Referer": BASE})
             pay_url = final_resp.headers.get('Location', redirect)
         else:
-            raise Exception("支付跳转失败")
+            error_detail = f"支付跳转失败，状态码: {resp.status_code}, 响应: {resp.text[:200]}"
+            raise Exception(error_detail)
 
         return jsonify(success=True, pay_url=pay_url)
     except Exception as e:
-        # 打印完整错误堆栈到标准错误输出（systemd 日志会捕获）
         traceback.print_exc()
         return jsonify(success=False, error=str(e))
 
