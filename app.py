@@ -3,6 +3,8 @@ import requests
 from bs4 import BeautifulSoup
 import os
 import traceback
+import time
+import random
 
 app = Flask(__name__)
 
@@ -34,6 +36,8 @@ HTML_PAGE = '''
         button:disabled { background: #aaa; }
         #status { margin-top: 15px; padding: 10px; background: #f0f0f0; border-radius: 6px; }
         #pay-btn { background: #52c41a; display: none; }
+        #manual-btn { background: #fa8c16; display: none; }
+        .warning { color: #fa8c16; margin-top: 10px; font-size: 14px; }
     </style>
 </head>
 <body>
@@ -48,9 +52,11 @@ HTML_PAGE = '''
     <button onclick="generateOrder()">开始生成订单</button>
     <div id="status">等待操作...</div>
     <button id="pay-btn" onclick="openPayment()">打开支付宝付款</button>
+    <button id="manual-btn" onclick="openManualPayment()">手动完成支付</button>
 
     <script>
         let payUrl = "";
+        let manualUrl = "";
         async function generateOrder() {
             const qq = document.getElementById("qq").value;
             const product = document.getElementById("product").value;
@@ -58,6 +64,7 @@ HTML_PAGE = '''
             const btn = document.querySelector("button");
             btn.disabled = true;
             document.getElementById('pay-btn').style.display = "none";
+            document.getElementById('manual-btn').style.display = "none";
             document.getElementById('status').innerText = "正在生成订单...";
             try {
                 const res = await fetch("/api/order", {
@@ -67,9 +74,18 @@ HTML_PAGE = '''
                 });
                 const data = await res.json();
                 if (data.success) {
-                    payUrl = data.pay_url;
-                    document.getElementById('status').innerHTML = "✅ 订单生成成功！<br>点击下方按钮付款。";
-                    document.getElementById('pay-btn').style.display = "block";
+                    // 自动模式成功（未来可能恢复）
+                    if (data.pay_url) {
+                        payUrl = data.pay_url;
+                        document.getElementById('status').innerHTML = "✅ 订单生成成功！<br>点击下方按钮付款。";
+                        document.getElementById('pay-btn').style.display = "block";
+                    }
+                    // 手动模式：返回了 manual_url
+                    else if (data.manual_url) {
+                        manualUrl = data.manual_url;
+                        document.getElementById('status').innerHTML = "✅ 订单已生成，<br>但需手动完成安全验证。<br>请点击下方按钮，在新窗口中完成滑动验证后付款。";
+                        document.getElementById('manual-btn').style.display = "block";
+                    }
                 } else {
                     document.getElementById('status').innerText = "❌ 失败：" + data.error;
                 }
@@ -83,6 +99,12 @@ HTML_PAGE = '''
             window.open(payUrl, "_blank");
             document.getElementById('pay-btn').style.display = "none";
             document.getElementById('status').innerHTML += '<br>✅ 已为您打开支付页面，请查看浏览器新窗口。';
+        }
+        function openManualPayment() {
+            if (!manualUrl) return;
+            window.open(manualUrl, "_blank");
+            document.getElementById('manual-btn').style.display = "none";
+            document.getElementById('status').innerHTML += '<br>🔔 已打开支付验证页面，请在新窗口中完成滑动验证。';
         }
     </script>
 </body>
@@ -107,16 +129,22 @@ def create_order():
 
     try:
         s = requests.Session()
+        user_agents = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        ]
         s.headers.update({
-            "User-Agent": "Mozilla/5.0 ... Chrome/148.0.0.0 Safari/537.36"
+            "User-Agent": random.choice(user_agents),
+            "Accept-Language": "zh-CN,zh;q=0.9",
         })
 
-        # 获取token
+        # 获取 token
         resp = s.get(f"{BASE}/products/{config['product_id']}")
         soup = BeautifulSoup(resp.text, 'html.parser')
         token = soup.find('meta', {'name': 'csrf-token'})['content']
 
         # 加购
+        time.sleep(random.uniform(1, 2))
         resp = s.post(f"{BASE}/carts",
                       json={"sku_id": config['sku_id'], "quantity": 1, "buy_now": False},
                       headers={"Content-Type": "application/json", "X-CSRF-TOKEN": token,
@@ -124,7 +152,8 @@ def create_order():
         if resp.status_code != 200:
             raise Exception(f"加购失败，状态码: {resp.status_code}, 响应: {resp.text[:100]}")
 
-        # 结算页刷新token
+        # 结算页刷新 token
+        time.sleep(random.uniform(0.5, 1.5))
         resp = s.get(f"{BASE}/checkout")
         soup = BeautifulSoup(resp.text, 'html.parser')
         token_meta = soup.find('meta', {'name': 'csrf-token'})
@@ -132,6 +161,7 @@ def create_order():
             token = token_meta['content']
 
         # 下单
+        time.sleep(random.uniform(1, 2))
         resp = s.post(f"{BASE}/checkout/confirm",
                       json={"comment": "", "qq": qq},
                       headers={"Content-Type": "application/json", "X-CSRF-TOKEN": token,
@@ -140,18 +170,25 @@ def create_order():
             raise Exception(f"下单失败，状态码: {resp.status_code}, 响应: {resp.text[:100]}")
         order_no = resp.json()['number']
 
-        # 获取支付链接
-        resp = s.get(f"{BASE}/orders/{order_no}/NiupayPay?type=create",
-                     allow_redirects=False, headers={"Referer": f"{BASE}/checkout"})
-        if resp.status_code in (301, 302):
-            redirect = resp.headers['Location']
-            final_resp = s.get(redirect, allow_redirects=False, headers={"Referer": BASE})
-            pay_url = final_resp.headers.get('Location', redirect)
-        else:
-            error_detail = f"支付跳转失败，状态码: {resp.status_code}, 响应: {resp.text}"
-            raise Exception(error_detail)
+        # 尝试自动获取支付链接（如果后续风控降低，这里可以恢复）
+        try:
+            resp = s.get(f"{BASE}/orders/{order_no}/NiupayPay?type=create",
+                         allow_redirects=False, headers={"Referer": f"{BASE}/checkout"})
+            if resp.status_code in (301, 302):
+                redirect = resp.headers['Location']
+                final_resp = s.get(redirect, allow_redirects=False, headers={"Referer": BASE})
+                pay_url = final_resp.headers.get('Location', redirect)
+                return jsonify(success=True, pay_url=pay_url)
+            else:
+                # 自动模式失败，回落手动模式
+                raise Exception("自动模式触发验证，转手动")
+        except:
+            pass
 
-        return jsonify(success=True, pay_url=pay_url)
+        # 手动模式：返回直接支付链接，让用户在新窗口中完成验证
+        manual_url = f"{BASE}/orders/{order_no}/NiupayPay?type=create"
+        return jsonify(success=True, manual_url=manual_url)
+
     except Exception as e:
         traceback.print_exc()
         return jsonify(success=False, error=str(e))
