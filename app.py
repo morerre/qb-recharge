@@ -55,7 +55,8 @@ DELAY_CONFIG = {
     "server": {"min": 0.1, "max": 0.5},
     "proxy1": {"min": 0, "max": 0.3},
     "proxy2": {"min": 0, "max": 0.3},
-    "proxy3": {"min": 0, "max": 0.3}
+    "proxy3": {"min": 0, "max": 0.3},
+    "local": {"min": 0, "max": 0}
 }
 REQUEST_TIMEOUT = (3, 8)
 # ============================================
@@ -99,6 +100,7 @@ HTML_PAGE = '''
         <option value="proxy1">(目前免费)代理 1</option>
         <option value="proxy2">(0.005一条)代理 2</option>
         <option value="proxy3">(0.0012一条)代理 3</option>
+        <option value="local">浏览器直连（极速）</option>
     </select>
     <button onclick="generateOrder()">开始生成订单</button>
     <button id="pay-btn" onclick="goToPay()">前往支付</button>
@@ -126,11 +128,17 @@ HTML_PAGE = '''
                     currentPayUrl = data.pay_url || data.manual_url || "";
                     if (currentPayUrl) {
                         document.getElementById('pay-btn').style.display = "block";
+                        let msg = "";
                         if (data.pay_url) {
-                            document.getElementById('status').innerHTML = "✅ 订单生成成功，点击下方按钮付款。";
-                        } else {
-                            document.getElementById('status').innerHTML = "✅ 订单已生成，需手动完成验证。<br>点击下方按钮，在新窗口中完成操作。";
+                            msg = "✅ 订单生成成功，点击下方按钮付款。";
+                        } else if (data.manual_url) {
+                            if (channel === "local") {
+                                msg = "✅ 已打开商品页，请在新窗口中自行完成购买。";
+                            } else {
+                                msg = "✅ 订单已生成，但需手动完成下单及支付。<br>请点击下方按钮，在新窗口中操作。";
+                            }
                         }
+                        document.getElementById('status').innerHTML = msg;
                     } else {
                         document.getElementById('status').innerText = "❌ 失败：未获取到支付链接";
                     }
@@ -163,7 +171,7 @@ def create_order():
     qq = data.get('qq', '').strip()
     product = data.get('product', '5QB')
     channel = data.get('channel', 'server')
-    if channel not in ('server', 'proxy1', 'proxy2', 'proxy3'):
+    if channel not in ('server', 'proxy1', 'proxy2', 'proxy3', 'local'):
         channel = 'server'
 
     if not qq or not qq.isdigit():
@@ -173,18 +181,29 @@ def create_order():
     if not config:
         return jsonify(success=False, error='不支持的面额')
 
+    # 浏览器直连：直接返回商品页
+    if channel == 'local':
+        product_url = f"{BASE}/products/{config['product_id']}"
+        return jsonify(success=True, manual_url=product_url)
+
     delay_cfg = DELAY_CONFIG.get(channel, {"min": 0, "max": 0.5})
     d_min, d_max = delay_cfg["min"], delay_cfg["max"]
 
+    # 模拟真实浏览器的 User-Agent 和客户端提示
     user_agents = [
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:135.0) Gecko/20100101 Firefox/135.0",
+    ]
+
+    # 随机生成 sec-ch-ua 字段
+    sec_ch_ua_list = [
+        '"Chromium";v="148", "Google Chrome";v="148", "Not(A:Brand";v="99"',
+        '"Chromium";v="148", "Google Chrome";v="148", "Not;A=Brand";v="99"',
     ]
 
     try:
         s = requests.Session()
-
-        # 通用浏览器头
         s.headers.update({
             "User-Agent": random.choice(user_agents),
             "Accept-Language": "zh-CN,zh;q=0.9",
@@ -203,8 +222,16 @@ def create_order():
         time.sleep(random.uniform(d_min, d_max))
         resp = s.post(f"{BASE}/carts",
                       json={"sku_id": config['sku_id'], "quantity": 1, "buy_now": False},
-                      headers={"Content-Type": "application/json", "X-CSRF-TOKEN": token,
-                               "Referer": f"{BASE}/products/{config['product_id']}", "Origin": BASE},
+                      headers={
+                          "Content-Type": "application/json",
+                          "X-CSRF-TOKEN": token,
+                          "Referer": f"{BASE}/products/{config['product_id']}",
+                          "Origin": BASE,
+                          "Accept": "application/json, text/plain, */*",
+                          "sec-ch-ua": random.choice(sec_ch_ua_list),
+                          "sec-ch-ua-mobile": "?0",
+                          "sec-ch-ua-platform": random.choice(["Windows", "macOS"]),
+                      },
                       proxies=proxy, timeout=REQUEST_TIMEOUT)
         if resp.status_code != 200:
             raise Exception(f"加购失败，状态码: {resp.status_code}")
@@ -217,11 +244,10 @@ def create_order():
         if token_meta:
             token = token_meta['content']
 
-        # ---------- 4. 下单（增强反风控 + 重试） ----------
+        # ---------- 4. 下单（高仿真 + 多次重试） ----------
         order_success = False
         order_resp = None
-        # 补充更多真实请求头
-        order_headers = {
+        order_headers_base = {
             "Content-Type": "application/json",
             "X-CSRF-TOKEN": token,
             "Referer": f"{BASE}/checkout",
@@ -236,10 +262,18 @@ def create_order():
             "Sec-Fetch-Site": "same-origin",
         }
 
-        for attempt in range(2):
+        for attempt in range(3):  # 最多尝试 3 次
             try:
-                order_proxy = get_proxy(channel)  # 每次尝试用新代理
-                time.sleep(random.uniform(0.5, 1.0))
+                # 每次尝试使用不同的代理和随机头
+                order_proxy = get_proxy(channel)
+                order_headers = order_headers_base.copy()
+                order_headers["User-Agent"] = random.choice(user_agents)
+                order_headers["sec-ch-ua"] = random.choice(sec_ch_ua_list)
+                order_headers["sec-ch-ua-mobile"] = "?0"
+                order_headers["sec-ch-ua-platform"] = random.choice(["Windows", "macOS"])
+
+                # 随机延迟 1~2 秒
+                time.sleep(random.uniform(1.0, 2.0))
                 order_resp = s.post(
                     f"{BASE}/checkout/confirm",
                     json={"comment": "", "qq": qq},
@@ -251,8 +285,9 @@ def create_order():
                     order_success = True
                     break
                 elif order_resp.status_code == 403:
-                    print(f"[下单] 403，重试 {attempt+1}/2", flush=True)
-                    time.sleep(random.uniform(1, 2))
+                    print(f"[下单] 403 人机验证，重试 {attempt+1}/3", flush=True)
+                    # 换代理、换延迟
+                    time.sleep(random.uniform(2, 3))
                 else:
                     raise Exception(f"下单失败，状态码: {order_resp.status_code}")
             except requests.exceptions.ProxyError:
@@ -260,7 +295,7 @@ def create_order():
                 time.sleep(1)
 
         if not order_success:
-            # 全部重试失败，降级为手动：直接打开结算页
+            # 全部重试失败，返回结算页让用户手动完成
             manual_url = f"{BASE}/checkout"
             return jsonify(success=True, manual_url=manual_url)
 
@@ -278,7 +313,6 @@ def create_order():
             pay_url = final_resp.headers.get('Location', redirect)
             return jsonify(success=True, pay_url=pay_url)
         else:
-            # 支付跳转失败，提供手动支付链接
             manual_url = f"{BASE}/orders/{order_no}/NiupayPay?type=create"
             return jsonify(success=True, manual_url=manual_url)
 
