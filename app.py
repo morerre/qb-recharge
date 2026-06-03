@@ -18,7 +18,7 @@ PRODUCTS = {
 PROXY_API = {
     "proxy1": "http://v2.api.juliangip.com/company/dynamic/getips?num=1&pt=1&result_type=text&split=1&trade_no=1241338770898758&sign=d056dad25530e29a3cd0dd97a511b267",
     "proxy2": "http://v2.api.juliangip.com/company/postpay/getips?num=1&pt=1&result_type=text&split=1&trade_no=6164279085883863&sign=68cf4e1e5b3287cbe03b06d4ea1e37e7",
-    "proxy3": "http://v2.api.juliangip.com/postpay/getips?num=1&pt=1&result_type=text&split=1&trade_no=6538645717948532&sign=8e14bcedbdd1c50743cc5cda8dfb9520"   # 预留，填入新代理 API 即可激活
+    "proxy3": "http://v2.api.juliangip.com/postpay/getips?num=1&pt=1&result_type=text&split=1&trade_no=6538645717948532&sign=8e14bcedbdd1c50743cc5cda8dfb9520"
 }
 _cache = {
     "proxy1": {"proxy": None, "time": 0},
@@ -51,15 +51,15 @@ def get_proxy(channel):
     return cache["proxy"]
 
 # ================= 速度控制 =================
-# 若使用代理，可将延迟设为0或极小值；直连则建议保留0.5~1秒
 DELAY_CONFIG = {
-    "server": {"min": 0.1, "max": 0.5},   # 直连防止被封
-    "proxy1": {"min": 0, "max": 0.3},     # 代理可快速
+    "server": {"min": 0.1, "max": 0.5},
+    "proxy1": {"min": 0, "max": 0.3},
     "proxy2": {"min": 0, "max": 0.3},
     "proxy3": {"min": 0, "max": 0.3}
 }
-REQUEST_TIMEOUT = (3, 8)   # 连接超时3秒，读取8秒
+REQUEST_TIMEOUT = (3, 8)
 # ============================================
+
 HTML_PAGE = '''
 <!DOCTYPE html>
 <html>
@@ -105,7 +105,7 @@ HTML_PAGE = '''
     <div id="status">等待操作...</div>
 
     <script>
-        let currentPayUrl = "";   // 可能是支付宝链接，也可能是手动验证链接
+        let currentPayUrl = "";
         async function generateOrder() {
             const qq = document.getElementById("qq").value;
             const product = document.getElementById("product").value;
@@ -123,14 +123,13 @@ HTML_PAGE = '''
                 });
                 const data = await res.json();
                 if (data.success) {
-                    // 统一保存链接：pay_url 或 manual_url
                     currentPayUrl = data.pay_url || data.manual_url || "";
                     if (currentPayUrl) {
                         document.getElementById('pay-btn').style.display = "block";
                         if (data.pay_url) {
                             document.getElementById('status').innerHTML = "✅ 订单生成成功，点击下方按钮付款。";
                         } else {
-                            document.getElementById('status').innerHTML = "✅ 订单已生成，需手动完成验证。<br>点击下方按钮，在新窗口中完成滑动验证后付款。";
+                            document.getElementById('status').innerHTML = "✅ 订单已生成，需手动完成验证。<br>点击下方按钮，在新窗口中完成操作。";
                         }
                     } else {
                         document.getElementById('status').innerText = "❌ 失败：未获取到支付链接";
@@ -146,9 +145,8 @@ HTML_PAGE = '''
         function goToPay() {
             if (!currentPayUrl) return;
             window.open(currentPayUrl, "_blank");
-            // 点击后按钮隐藏，给出提示
             document.getElementById('pay-btn').style.display = "none";
-            document.getElementById('status').innerHTML += '<br>✅ 已为您打开支付页面，请查看新窗口。';
+            document.getElementById('status').innerHTML += '<br>✅ 已为您打开页面，请查看新窗口。';
         }
     </script>
 </body>
@@ -175,29 +173,33 @@ def create_order():
     if not config:
         return jsonify(success=False, error='不支持的面额')
 
-    # 获取该通道的延迟范围
     delay_cfg = DELAY_CONFIG.get(channel, {"min": 0, "max": 0.5})
     d_min, d_max = delay_cfg["min"], delay_cfg["max"]
 
+    user_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    ]
+
     try:
         s = requests.Session()
-        user_agents = [
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        ]
+
+        # 通用浏览器头
         s.headers.update({
             "User-Agent": random.choice(user_agents),
             "Accept-Language": "zh-CN,zh;q=0.9",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Connection": "keep-alive",
         })
 
         proxy = get_proxy(channel)
 
-        # 获取 token
+        # ---------- 1. 获取 token ----------
         resp = s.get(f"{BASE}/products/{config['product_id']}", proxies=proxy, timeout=REQUEST_TIMEOUT)
         soup = BeautifulSoup(resp.text, 'html.parser')
         token = soup.find('meta', {'name': 'csrf-token'})['content']
 
-        # 加购
+        # ---------- 2. 加购 ----------
         time.sleep(random.uniform(d_min, d_max))
         resp = s.post(f"{BASE}/carts",
                       json={"sku_id": config['sku_id'], "quantity": 1, "buy_now": False},
@@ -207,7 +209,7 @@ def create_order():
         if resp.status_code != 200:
             raise Exception(f"加购失败，状态码: {resp.status_code}")
 
-        # 结算页刷新 token
+        # ---------- 3. 结算页刷新 token ----------
         time.sleep(random.uniform(d_min, d_max))
         resp = s.get(f"{BASE}/checkout", proxies=proxy, timeout=REQUEST_TIMEOUT)
         soup = BeautifulSoup(resp.text, 'html.parser')
@@ -215,18 +217,56 @@ def create_order():
         if token_meta:
             token = token_meta['content']
 
-        # 下单
-        time.sleep(random.uniform(d_min, d_max))
-        resp = s.post(f"{BASE}/checkout/confirm",
-                      json={"comment": "", "qq": qq},
-                      headers={"Content-Type": "application/json", "X-CSRF-TOKEN": token,
-                               "Referer": f"{BASE}/checkout", "Origin": BASE},
-                      proxies=proxy, timeout=REQUEST_TIMEOUT)
-        if resp.status_code not in (200, 201):
-            raise Exception(f"下单失败，状态码: {resp.status_code}")
-        order_no = resp.json()['number']
+        # ---------- 4. 下单（增强反风控 + 重试） ----------
+        order_success = False
+        order_resp = None
+        # 补充更多真实请求头
+        order_headers = {
+            "Content-Type": "application/json",
+            "X-CSRF-TOKEN": token,
+            "Referer": f"{BASE}/checkout",
+            "Origin": BASE,
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Accept-Language": "zh-CN,zh;q=0.9",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
+        }
 
-        # 获取支付链接（重新拿新代理，保证新鲜）
+        for attempt in range(2):
+            try:
+                order_proxy = get_proxy(channel)  # 每次尝试用新代理
+                time.sleep(random.uniform(0.5, 1.0))
+                order_resp = s.post(
+                    f"{BASE}/checkout/confirm",
+                    json={"comment": "", "qq": qq},
+                    headers=order_headers,
+                    proxies=order_proxy,
+                    timeout=REQUEST_TIMEOUT
+                )
+                if order_resp.status_code in (200, 201):
+                    order_success = True
+                    break
+                elif order_resp.status_code == 403:
+                    print(f"[下单] 403，重试 {attempt+1}/2", flush=True)
+                    time.sleep(random.uniform(1, 2))
+                else:
+                    raise Exception(f"下单失败，状态码: {order_resp.status_code}")
+            except requests.exceptions.ProxyError:
+                print("[下单] 代理错误，重试", flush=True)
+                time.sleep(1)
+
+        if not order_success:
+            # 全部重试失败，降级为手动：直接打开结算页
+            manual_url = f"{BASE}/checkout"
+            return jsonify(success=True, manual_url=manual_url)
+
+        order_no = order_resp.json()['number']
+
+        # ---------- 5. 获取支付链接 ----------
         pay_proxy = get_proxy(channel)
         resp = s.get(f"{BASE}/orders/{order_no}/NiupayPay?type=create",
                      allow_redirects=False, headers={"Referer": f"{BASE}/checkout"},
@@ -238,6 +278,7 @@ def create_order():
             pay_url = final_resp.headers.get('Location', redirect)
             return jsonify(success=True, pay_url=pay_url)
         else:
+            # 支付跳转失败，提供手动支付链接
             manual_url = f"{BASE}/orders/{order_no}/NiupayPay?type=create"
             return jsonify(success=True, manual_url=manual_url)
 
