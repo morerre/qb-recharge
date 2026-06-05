@@ -1,3 +1,5 @@
-flask
+playwright==1.40.0
+pandas
 requests
-beautifulsoup4
+httpx
+python-dotenv
