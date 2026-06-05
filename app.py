@@ -1,8 +1,9 @@
+import asyncio
+import re
+import time as _time
+from urllib.parse import unquote
+from playwright.async_api import async_playwright
 from flask import Flask, request, jsonify, render_template_string
-import requests
-from bs4 import BeautifulSoup
-import os
-app = Flask(__name__)
 
 BASE = "https://www.whquxinyong.xyz"
 PRODUCTS = {
@@ -10,149 +11,253 @@ PRODUCTS = {
     "5QB": {"product_id": "221", "sku_id": "1047"},
 }
 
-HTML_PAGE = '''
+async def do_order(qq, product):
+    if product not in PRODUCTS:
+        return None, "无效面额"
+    config = PRODUCTS[product]
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-gpu",
+                "--window-size=1280,720",
+                "--disable-dev-shm-usage",
+                "--disable-extensions",
+                "--disable-background-networking",
+                "--disable-sync",
+                "--mute-audio",
+                "--hide-scrollbars",
+            ]
+        )
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
+            viewport={"width": 1280, "height": 720}
+        )
+        await context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => false });
+            window.chrome = { runtime: {} };
+        """)
+        page = await context.new_page()
+
+        try:
+            # 1. 打开商品页，不等无用元素，直接等待必要元素（例如加购按钮，可选）
+            await page.goto(f"{BASE}/products/{config['product_id']}", wait_until="domcontentloaded")
+            # 用极短缓冲代替原来1000ms，提高速度
+            await page.wait_for_timeout(300)
+
+            # 2. 加购
+            cookies = await page.context.cookies()
+            xsrf_token = next((unquote(c['value']) for c in cookies if c['name'] == 'XSRF-TOKEN'), None)
+            if not xsrf_token:
+                xsrf_token = await page.eval_on_selector('meta[name="csrf-token"]', 'el => el.content')
+            await page.evaluate(f"""
+                fetch("{BASE}/carts", {{
+                    method: "POST",
+                    headers: {{ "Content-Type": "application/json", "X-XSRF-TOKEN": "{xsrf_token}" }},
+                    body: JSON.stringify({{ sku_id: "{config['sku_id']}", quantity: 1, buy_now: false }})
+                }})
+            """)
+            # 加购后只需确保请求已发出，等待200ms即可
+            await page.wait_for_timeout(200)
+
+            # 3. 结算页，直接等待QQ输入框出现
+            await page.goto(f"{BASE}/checkout", wait_until="domcontentloaded")
+            await page.wait_for_selector("input#qq, input[name='qq']", timeout=10000)
+
+            # 4. 填写QQ并提交
+            await page.fill("input#qq, input[name='qq']", qq)
+            submit_btn = page.locator("button:has-text('确认支付'), button:has-text('提交订单')").first
+            await submit_btn.click()
+            print(f"[下单] QQ:{qq} 面额:{product} 已提交，等待滑块...")
+            # 直接等待滑块出现，不再盲等1秒
+            await page.wait_for_selector(".checkout-slider-thumb", timeout=15000)
+
+            # 5. 滑块
+            slider = page.locator(".checkout-slider-thumb").first
+            box = await slider.bounding_box()
+            parent = slider.locator("..")
+            parent_box = await parent.bounding_box()
+            max_distance = parent_box['width'] - box['width'] if parent_box else 300
+            start_x = box['x'] + box['width'] / 2
+            start_y = box['y'] + box['height'] / 2
+            await page.mouse.move(start_x, start_y)
+            await page.mouse.down()
+            steps = 40
+            for i in range(steps + 1):
+                progress = i / steps
+                eased = 1 - (1 - progress) ** 3
+                cur_x = start_x + max_distance * eased
+                jitter = (i % 2) * 1.5
+                await page.mouse.move(cur_x, start_y + jitter, steps=1)
+                await page.wait_for_timeout(6)
+            await page.mouse.up()
+            print("[下单] 滑块完成")
+            # 极短缓冲，等待跳转动画
+            await page.wait_for_timeout(500)
+
+            # 6. 获取支付链接（轮询加速）
+            start_time = _time.time()
+            pay_url = None
+            new_page = None
+            async def handle_new_page(p):
+                nonlocal new_page
+                new_page = p
+            context.on("page", handle_new_page)
+
+            while _time.time() - start_time < 15:
+                cur_url = page.url
+                if "payOrderId" in cur_url or "ztds.whqsq.xyz" in cur_url:
+                    pay_url = cur_url
+                    break
+                if new_page:
+                    new_url = new_page.url
+                    if "payOrderId" in new_url or "ztds.whqsq.xyz" in new_url:
+                        pay_url = new_url
+                        break
+                await asyncio.sleep(0.15)
+            context.remove_listener("page", handle_new_page)
+
+            if not pay_url:
+                try:
+                    el = page.locator("a[href*='payOrderId'], a[href*='ztds.whqsq.xyz']").first
+                    pay_url = await el.get_attribute("href")
+                except:
+                    pass
+
+            await browser.close()
+            return pay_url, None
+        except Exception as e:
+            await browser.close()
+            return None, str(e)
+
+# ---------- Flask 部分保持不变 ----------
+app = Flask(__name__)
+
+HTML_PAGE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
-    <title>自动助手</title>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>牛牛自动下单</title>
     <style>
-        body { font-family: sans-serif; max-width: 400px; margin: 40px auto; padding: 20px; }
-        input, select, button {
-            width: 100%;
-            padding: 10px;
-            margin: 8px 0;
-            font-size: 16px;
-            box-sizing: border-box; /* 关键：padding 不会撑宽 */
-            border: 1px solid #ccc;   /* 统一边框，保证一样宽 */
-        }
-        button { background: #1677ff; color: white; border: none; border-radius: 6px; cursor: pointer; }
-        button:disabled { background: #aaa; }
-        #status { margin-top: 15px; padding: 10px; background: #f0f0f0; border-radius: 6px; }
-        #pay-btn { background: #52c41a; display: none; }
+        body { font-family: Arial; margin: 20px; text-align: center; }
+        .container { max-width: 400px; margin: auto; }
+        input, select, button { padding: 10px; width: 100%; margin: 8px 0; box-sizing: border-box; font-size: 16px; }
+        button { background: #007bff; color: white; border: none; cursor: pointer; }
+        button:disabled { background: #ccc; }
+        .pay-btn { background: #28a745; color: white; text-decoration: none; padding: 12px; border-radius: 5px; display: inline-block; width: 100%; box-sizing: border-box; }
+        .loading { color: #666; font-style: italic; }
+        .error { color: red; }
     </style>
 </head>
 <body>
-    <h2>Q币充值助手</h2>
-    <label>QQ号码：</label>
-    <input type="text" id="qq" placeholder="请输入QQ号">
-    <label>面额：</label>
-    <select id="product">
-        <option value="5QB">5QB</option>
-        <option value="1QB">1QB</option>
-    </select>
-    <button onclick="generateOrder()">开始生成订单</button>
-    <div id="status">等待操作...</div>
-    <button id="pay-btn" onclick="openPayment()">打开支付宝付款</button>
+<div class="container">
+    <h2>牛牛自动</h2>
+    <div>
+        <label>QQ号:</label>
+        <input type="text" id="qq" placeholder="请输入QQ号" required>
+    </div>
+    <div>
+        <label>面额:</label>
+        <select id="product">
+            <option value="1QB">1QB</option>
+            <option value="5QB" selected>5QB</option>
+        </select>
+    </div>
+    <div>
+        <button id="orderBtn" onclick="startOrder()">生成订单</button>
+    </div>
+    <div id="loading" class="loading" style="display:none;">下单中...</div>
+    <div id="error" class="error"></div>
+    <a id="payLink" href="#" target="_blank" class="pay-btn" style="display:none;">点击去支付</a>
+</div>
 
-    <script>
-        let payUrl = "";
-        async function generateOrder() {
-            const qq = document.getElementById("qq").value;
-            const product = document.getElementById("product").value;
-            if (!/^\d{5,}$/.test(qq)) { alert("请输入有效QQ号"); return; }
-            const btn = document.querySelector("button");
-            btn.disabled = true;
-            document.getElementById('pay-btn').style.display = "none";
-            document.getElementById('status').innerText = "正在生成订单...";
-            try {
-                const res = await fetch("/api/order", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ qq, product })
-                });
-                const data = await res.json();
-                if (data.success) {
-                    payUrl = data.pay_url;
-                    document.getElementById('status').innerHTML = "✅ 订单生成成功！<br>点击下方按钮付款。";
-                    document.getElementById('pay-btn').style.display = "block";
-                } else {
-                    document.getElementById('status').innerText = "❌ 失败：" + data.error;
-                }
-            } catch (e) {
-                document.getElementById('status').innerText = "❌ 网络错误";
-            }
-            btn.disabled = false;
+<script>
+async function startOrder() {
+    const qq = document.getElementById('qq').value.trim();
+    const product = document.getElementById('product').value;
+    const btn = document.getElementById('orderBtn');
+    const loading = document.getElementById('loading');
+    const errorDiv = document.getElementById('error');
+    const payLink = document.getElementById('payLink');
+
+    if (!qq) {
+        errorDiv.innerText = '请输入QQ号';
+        return;
+    }
+    errorDiv.innerText = '';
+    payLink.style.display = 'none';
+    btn.disabled = true;
+    loading.style.display = 'block';
+    loading.innerText = '正在下单中';
+
+    try {
+        const formData = new FormData();
+        formData.append('qq', qq);
+        formData.append('product', product);
+
+        const response = await fetch('/order', {
+            method: 'POST',
+            body: formData
+        });
+        const data = await response.json();
+
+        if (data.status === 'success') {
+            payLink.href = data.pay_url;
+            payLink.style.display = 'block';
+            payLink.onclick = function() {
+                this.style.display = 'none';
+            };
+            loading.innerText = '✅ 订单生成成功！点击下方按钮支付。';
+        } else {
+            errorDiv.innerText = '下单失败: ' + data.message;
+            loading.style.display = 'none';
         }
-        function openPayment() {
-            if (!payUrl) return;
-            window.open(payUrl, "_blank");
-            // 点击后隐藏按钮，并显示提示
-            document.getElementById('pay-btn').style.display = "none";
-            document.getElementById('status').innerHTML += '<br>✅ 已为您打开支付页面，请查看浏览器新窗口。';
-        }
-    </script>
+    } catch (err) {
+        errorDiv.innerText = '网络错误: ' + err;
+        loading.style.display = 'none';
+    } finally {
+        btn.disabled = false;
+    }
+}
+</script>
 </body>
 </html>
-'''
+"""
 
 @app.route('/')
 def index():
     return render_template_string(HTML_PAGE)
 
-@app.route('/api/order', methods=['POST'])
-def create_order():
-    data = request.get_json()
-    qq = data.get('qq', '').strip()
-    product = data.get('product', '5QB')
-    if not qq or not qq.isdigit():
-        return jsonify(success=False, error='QQ号格式错误')
-
-    config = PRODUCTS.get(product)
-    if not config:
-        return jsonify(success=False, error='不支持的面额')
+@app.route('/order', methods=['POST'])
+def order():
+    qq = request.form.get('qq', '').strip()
+    product = request.form.get('product', '').strip()
+    if not qq:
+        return jsonify({"status": "error", "message": "QQ号不能为空"})
 
     try:
-        s = requests.Session()
-        s.headers.update({
-            "User-Agent": "Mozilla/5.0 ... Chrome/148.0.0.0 Safari/537.36"
-        })
-
-        # 获取token
-        resp = s.get(f"{BASE}/products/{config['product_id']}")
-        soup = BeautifulSoup(resp.text, 'html.parser')
-        token = soup.find('meta', {'name': 'csrf-token'})['content']
-
-        # 加购
-        resp = s.post(f"{BASE}/carts",
-                      json={"sku_id": config['sku_id'], "quantity": 1, "buy_now": False},
-                      headers={"Content-Type": "application/json", "X-CSRF-TOKEN": token,
-                               "Referer": f"{BASE}/products/{config['product_id']}", "Origin": BASE})
-        if resp.status_code != 200:
-            raise Exception("加购失败")
-
-        # 结算页刷新token
-        resp = s.get(f"{BASE}/checkout")
-        soup = BeautifulSoup(resp.text, 'html.parser')
-        token_meta = soup.find('meta', {'name': 'csrf-token'})
-        if token_meta:
-            token = token_meta['content']
-
-        # 下单
-        resp = s.post(f"{BASE}/checkout/confirm",
-                      json={"comment": "", "qq": qq},
-                      headers={"Content-Type": "application/json", "X-CSRF-TOKEN": token,
-                               "Referer": f"{BASE}/checkout", "Origin": BASE})
-        if resp.status_code not in (200, 201):
-            raise Exception("下单失败")
-        order_no = resp.json()['number']
-
-        # 获取支付链接
-        resp = s.get(f"{BASE}/orders/{order_no}/NiupayPay?type=create",
-                     allow_redirects=False, headers={"Referer": f"{BASE}/checkout"})
-        if resp.status_code in (301, 302):
-            redirect = resp.headers['Location']
-            final_resp = s.get(redirect, allow_redirects=False, headers={"Referer": BASE})
-            pay_url = final_resp.headers.get('Location', redirect)
-        else:
-            raise Exception("支付跳转失败")
-
-        return jsonify(success=True, pay_url=pay_url)
+        pay_url, err = asyncio.run(do_order(qq, product))
     except Exception as e:
-        return jsonify(success=False, error=str(e))
+        return jsonify({"status": "error", "message": f"脚本异常: {str(e)}"})
+
+    if err:
+        return jsonify({"status": "error", "message": f"下单失败: {err}"})
+    if not pay_url:
+        return jsonify({"status": "error", "message": "未能获取支付链接"})
+
+    match = re.search(r'payOrderId=([^&]+)', pay_url)
+    order_id = match.group(1) if match else "未知"
+    return jsonify({
+        "status": "success",
+        "order_id": order_id,
+        "pay_url": pay_url
+    })
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    app.run(host='0.0.0.0', port=5000, debug=True)
