@@ -1,8 +1,8 @@
 services:
   - type: web
     name: niuniu-auto-order
-    runtime: docker          # 关键修改：从 image 改为 docker
-    repo: https://github.com/你的用户名/你的仓库名   # 替换成你的真实仓库地址
+    runtime: docker
+    repo: https://github.com/morerre/niuniu-qb   # 替换为你的真实仓库地址
     plan: free
     dockerfilePath: ./Dockerfile
     envVars:
