@@ -1,12 +1,11 @@
-FROM python:3.13-slim
+FROM python:3.11-slim
 
 WORKDIR /app
 
-# 安装系统依赖（添加 build-essential 以提供 g++/gcc）
+# 安装系统依赖（可选，3.11 不需要编译 greenlet，但保留以备其他需要）
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
-    build-essential \
     && apt-get clean
 
 # 升级 pip
