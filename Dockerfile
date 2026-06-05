@@ -2,16 +2,17 @@ FROM python:3.13-slim
 
 WORKDIR /app
 
-# 安装系统依赖
+# 安装系统依赖（添加 build-essential 以提供 g++/gcc）
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
+    build-essential \
     && apt-get clean
 
 # 升级 pip
 RUN pip install --upgrade pip
 
-# 复制 requirements.txt 并安装所有依赖（自动处理依赖关系）
+# 复制 requirements.txt 并安装所有依赖
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
