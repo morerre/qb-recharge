@@ -28,9 +28,7 @@ async def do_order(qq, product):
                 "--disable-dev-shm-usage",
                 "--disable-extensions",
                 "--disable-background-networking",
-                "--disable-sync",
                 "--mute-audio",
-                "--hide-scrollbars",
             ]
         )
         context = await browser.new_context(
@@ -44,28 +42,22 @@ async def do_order(qq, product):
         page = await context.new_page()
 
         try:
-            # 1. 打开商品页，不等无用元素，直接等待必要元素（例如加购按钮，可选）
-            await page.goto(f"{BASE}/products/{config['product_id']}", wait_until="domcontentloaded")
-            # 用极短缓冲代替原来1000ms，提高速度
-            await page.wait_for_timeout(300)
+            # 1. 打开商品页
+            await page.goto(f"{BASE}/products/{config['product_id']}", wait_until="networkidle")
 
-            # 2. 加购
-            cookies = await page.context.cookies()
-            xsrf_token = next((unquote(c['value']) for c in cookies if c['name'] == 'XSRF-TOKEN'), None)
-            if not xsrf_token:
-                xsrf_token = await page.eval_on_selector('meta[name="csrf-token"]', 'el => el.content')
-            await page.evaluate(f"""
-                fetch("{BASE}/carts", {{
-                    method: "POST",
-                    headers: {{ "Content-Type": "application/json", "X-XSRF-TOKEN": "{xsrf_token}" }},
-                    body: JSON.stringify({{ sku_id: "{config['sku_id']}", quantity: 1, buy_now: false }})
-                }})
-            """)
-            # 加购后只需确保请求已发出，等待200ms即可
-            await page.wait_for_timeout(200)
+            # 2. 点击加购按钮（兼容“立即购买”和“加入购物车”）
+            btn_selector = 'button:has-text("立即购买"), button:has-text("加入购物车"), a:has-text("立即购买")'
+            try:
+                await page.wait_for_selector(btn_selector, timeout=10000)
+                await page.locator(btn_selector).first.click()
+                print(f"[下单] 已点击加购按钮（面额:{product}）")
+            except Exception as e:
+                return None, f"点击加购按钮失败: {e}"
+            # 等待购物车更新
+            await page.wait_for_timeout(1000)
 
-            # 3. 结算页，直接等待QQ输入框出现
-            await page.goto(f"{BASE}/checkout", wait_until="domcontentloaded")
+            # 3. 进入结算页
+            await page.goto(f"{BASE}/checkout", wait_until="networkidle")
             await page.wait_for_selector("input#qq, input[name='qq']", timeout=10000)
 
             # 4. 填写QQ并提交
@@ -73,7 +65,6 @@ async def do_order(qq, product):
             submit_btn = page.locator("button:has-text('确认支付'), button:has-text('提交订单')").first
             await submit_btn.click()
             print(f"[下单] QQ:{qq} 面额:{product} 已提交，等待滑块...")
-            # 直接等待滑块出现，不再盲等1秒
             await page.wait_for_selector(".checkout-slider-thumb", timeout=15000)
 
             # 5. 滑块
@@ -96,7 +87,6 @@ async def do_order(qq, product):
                 await page.wait_for_timeout(6)
             await page.mouse.up()
             print("[下单] 滑块完成")
-            # 极短缓冲，等待跳转动画
             await page.wait_for_timeout(500)
 
             # 6. 获取支付链接（轮询加速）
