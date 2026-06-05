@@ -1,5 +1,4 @@
-# 使用 Playwright 官方 Python 镜像（基于 Ubuntu，已包含 Chromium 和所有依赖）
-FROM mcr.microsoft.com/playwright/python:v1.40.0-focal
+FROM mcr.microsoft.com/playwright/python:v1.48.0-focal
 
 WORKDIR /app
 
@@ -18,4 +17,3 @@ EXPOSE 5000
 
 # 启动命令
 CMD ["python", "app.py"]
-
