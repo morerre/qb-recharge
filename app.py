@@ -4,7 +4,10 @@ import time as _time
 import threading
 from playwright.async_api import async_playwright, Browser, Playwright
 from flask import Flask, request, jsonify, render_template_string
+from datetime import datetime
 
+def log(msg):
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
 BASE = "https://www.whquxinyong.xyz"
 PRODUCTS = {
     "1QB": {"product_id": "197", "sku_id": "1072"},
@@ -79,14 +82,14 @@ async def do_order(qq, product):
     try:
         # 1. 打开商品页
         await page.goto(f"{BASE}/products/{config['product_id']}", wait_until="domcontentloaded")
-        print(f"[下单] 打开商品页（面额:{product}）")
+        log(f"[下单] 打开商品页（面额:{product}）")
 
         # 2. 点击加购
         btn_selector = 'button:has-text("立即购买"), button:has-text("加入购物车"), a:has-text("立即购买")'
         try:
             await page.wait_for_selector(btn_selector, timeout=10000)
             await page.locator(btn_selector).first.click()
-            print(f"[下单] 已点击加购（面额:{product}）")
+            log(f"[下单] 已点击加购（面额:{product}）")
         except Exception as e:
             return None, f"点击加购失败: {e}"
 
@@ -100,7 +103,7 @@ async def do_order(qq, product):
         await page.fill("input#qq, input[name='qq']", qq)
         submit_btn = page.locator("button:has-text('确认支付'), button:has-text('提交订单')").first
         await submit_btn.click()
-        print(f"[下单] QQ:{qq} 面额:{product} 已提交订单，等待支付环节...")
+        log(f"[下单] QQ:{qq} 面额:{product} 已提交订单，等待支付环节...")
 
         # 5. 兼容两种流程：滑块 或 直接跳转
         # 先设置一个标志，记录是否已经处理过滑块
@@ -112,9 +115,9 @@ async def do_order(qq, product):
             nonlocal slider_done
             try:
                 # 只等待最多 2 秒，如果滑块出现就滑动，否则认为没有滑块
-                await page.wait_for_selector(".checkout-slider-thumb", timeout=1000)
+                await page.wait_for_selector(".checkout-slider-thumb", timeout=800)
                 slider_done = True
-                print("[下单] 检测到滑块，开始滑动...")
+                log("[下单] 检测到滑块，开始滑动...")
                 slider = page.locator(".checkout-slider-thumb").first
                 box = await slider.bounding_box()
                 parent = slider.locator("..")
@@ -133,11 +136,11 @@ async def do_order(qq, product):
                     await page.mouse.move(cur_x, start_y + jitter, steps=1)
                     await page.wait_for_timeout(4)
                 await page.mouse.up()
-                print("[下单] 滑块完成")
+                log("[下单] 滑块完成")
                 await page.wait_for_timeout(500)
             except Exception as e:
                 # 超时或没有滑块，忽略
-                print("[下单] 未出现滑块或滑块已过时，跳过")
+                log("[下单] 未出现滑块或滑块已过时，跳过")
 
         async def poll_pay_url():
             nonlocal pay_url
@@ -174,15 +177,15 @@ async def do_order(qq, product):
                 match = re.search(r'(https?://[^\s"\'<>]+(?:payOrderId|alipay/pay_wap_wudi)[^\s"\'<>]*)', content)
                 if match:
                     pay_url = match.group(1)
-                    print(f"[下单] 从页面源码提取支付链接: {pay_url}")
+                    log(f"[下单] 从页面源码提取支付链接: {pay_url}")
             except Exception as e:
-                print(f"[下单] 提取支付链接失败: {e}")
+                log(f"[下单] 提取支付链接失败: {e}")
 
         if not pay_url:
             return None, "未能获取支付链接（无滑块且未捕获跳转）"
 
         await context.close()
-        print(f"[下单] ✅ 成功获取支付链接: {pay_url}")
+        log(f"[下单] ✅ 成功获取支付链接: {pay_url}")
         return pay_url, None
 
     except Exception as e:
@@ -316,4 +319,4 @@ def order():
     })
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    app.run(host='0.0.0.0', port=8080, debug=False)
